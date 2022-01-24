@@ -60,7 +60,6 @@ impl<V> Persisted<V> for Indexer<V>
 where
     V: Encode + Decode<V> + From<Vec<u8>> + Display,
 {
-    // TODO: optimize use buffer fp
     fn save(&mut self, path: &str) -> Result<bool> {
         let fp = OpenOptions::new()
             .write(true)
@@ -83,11 +82,6 @@ where
                 .map_err(|err| UnexpectedError(err.to_string()))?;
             fp.write(&value)
                 .map_err(|err| UnexpectedError(err.to_string()))?;
-            //debug!(
-            //  "save entry: key:{}, {}",
-            //  String::from_utf8_lossy(&key),
-            //  entry
-            //);
         }
         fp.flush().map_err(|err| UnexpectedError(err.to_string()))?;
         Ok(true)
@@ -218,19 +212,6 @@ fn radix_tree() {
     let ok = tree.save(file_path.to_str().unwrap()).unwrap();
     assert!(ok);
 
-    drop(tree);
-    let mut tree: Indexer<Entry> = Indexer::new();
-    // let got = tree.load(file_path.to_str().unwrap(), None::<Fn(i32)>);
-    // assert!(got.is_ok());
-    //
-    // tree.store.iter().for_each(|(key, value)| {
-    //     assert_eq!(key, &value.key);
-    //     println!(
-    //         "{}, {:?}",
-    //         String::from_utf8_lossy(key),
-    //         serde_json::to_string(value).unwrap(),
-    //     )
-    // })
 }
 
 #[test]
