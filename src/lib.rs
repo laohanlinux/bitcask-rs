@@ -17,6 +17,7 @@ mod radix_tree;
 mod recover;
 mod tests_util;
 mod util;
+
 use std::ops::Sub;
 
 use crate::config::Config;
@@ -138,10 +139,6 @@ impl BitCask {
         }
         let hint = bc.put(key.clone(), value, ttl)?;
         bc.metadata.index_up_to_date = false;
-        if bc.hint_index.get(&key).is_some() {
-            // every put yields space
-            bc.metadata.reclaimable_space += hint.size;
-        }
         bc.hint_index.insert(key, hint);
         Ok(())
     }
@@ -166,9 +163,7 @@ impl BitCask {
 
     pub fn delete(&self, key: &Vec<u8>) -> Result<()> {
         let mut bc = self.lc();
-        if let Some((file_id, sz)) = bc.hint_index.get(key).map(|hint| (hint.file_id, hint.size)) {
-            bc.metadata.reclaimable_space += sz;
-        }
+        bc.put(key.clone(), vec![], None)?;
         bc.hint_index.remove(key);
         Ok(())
     }
@@ -353,7 +348,8 @@ impl BitCaskCore {
     fn delete_all(&mut self) -> Result<()> {
         self.hint_index.clear();
         let curr_file = { self.curr.take().unwrap().path_name() };
-        remove_file(curr_file)?;
+        remove_file(&curr_file)?;
+        debug!("remove current file: {}", curr_file);
         let data_files = self
             .datafiles
             .values()
@@ -363,11 +359,16 @@ impl BitCaskCore {
             self.datafiles.clear();
         }
         for data_file in data_files {
-            remove_file(data_file).map_err(|err| UnexpectedError(err.to_string()))?;
+            remove_file(&data_file).map_err(|err| UnexpectedError(err.to_string()))?;
+            debug!("remove data_file: {}", data_file);
         }
         {
             self.metadata.index_up_to_date = true;
-            self.metadata.reclaimable_space = 0;
+            self.metadata.total_space_used = 0;
+            self.metadata.dirty_space = 0;
+            let meta_file = Path::new(self.path.as_str()).join(MetaData::NAME);
+            remove_file(&meta_file).unwrap();
+            debug!("remove metadata file: {}", meta_file.to_string_lossy());
         }
         self.reopen()
     }
@@ -499,12 +500,9 @@ impl BitCaskCore {
 
 impl Drop for BitCaskCore {
     fn drop(&mut self) {
+        self.metadata.index_up_to_date = true;
         if let Err(err) = self.save_indexes() {
             error!("failed to save indexes, err: {}", err);
-        }
-        self.metadata.index_up_to_date = true;
-        if let Err(err) = self.metadata.save(&self.path) {
-            error!("failed to save metadata: err: {}", err);
         }
         debug!("bitcask core had drop");
     }
@@ -678,7 +676,7 @@ mod tests {
 
     #[test]
     fn delete_all() {
-        let n = 3;
+        let n = 10000;
         let bitcask = generate_n(n, 3);
         for i in 1..n {
             let value = bitcask.get(&format!("{}", i).into_bytes());
@@ -922,9 +920,16 @@ mod tests {
     fn mock(prefix: impl Into<Option<String>>) -> String {
         use log::LevelFilter;
         use std::io::Write;
-        // let mut builder = env_logger::builder();
-        // builder.is_test(true).format_module_path(true).format(|buf, record|
-        //     writeln!(buf, "tid: {}, {}", std::thread::current().id().as_u64(), record.args())).parse_env(Env::new().default_filter_or("info"));
+        use env_logger::Builder;
+
+        // {
+        //     let mut builder = Builder::from_default_env();
+        //     builder
+        //         .format(|buf, record| writeln!(buf, "[{} {} {}:{}] {}", chrono::Local::now(), record.level(), record.file_static().unwrap(), record.line().unwrap() , record.args()))
+        //         .filter(None, LevelFilter::Debug)
+        //         .try_init();
+        // }
+
         env_logger::try_init_from_env(Env::new().default_filter_or("info"));
         let prefix = prefix.into();
         return if let Some(prefix) = prefix {

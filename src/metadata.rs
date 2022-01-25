@@ -10,13 +10,12 @@ use std::ptr::write_bytes;
 #[derive(Default, Serialize, Deserialize)]
 pub struct MetaData {
     pub(crate) index_up_to_date: bool,
-    pub(crate) reclaimable_space: u64,
     pub(crate) total_space_used: u64,
     pub(crate) dirty_space: u64,
 }
 
 impl MetaData {
-    const NAME: &'static str = "metadata.toml";
+    pub const NAME: &'static str = "metadata.toml";
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let path = path.as_ref().join(Self::NAME);
         let path = path.as_os_str();
@@ -36,7 +35,9 @@ impl MetaData {
         let p = Path::new(path).join(Self::NAME);
         if !p.exists() {
             debug!("not found the {:?}, create a new", p.as_os_str());
-            return Ok(MetaData::default());
+            let metadata = MetaData::default();
+            metadata.save(path)?;
+            return Ok(metadata);
         }
         Self::load(p)
     }
