@@ -16,8 +16,9 @@ use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-// TODO add async read/write
-
+// TODO
+// 1: add async read/write
+// 2: enc/dec into Hint
 pub(crate) trait Persisted<V> {
     const KEY_SIZE: u64 = 8;
     const VALUE_SIZE: u64 = 8;
@@ -44,8 +45,8 @@ pub(crate) struct Indexer<V: Encode + Decode<V>> {
 }
 
 impl<V> Indexer<V>
-where
-    V: Encode + Decode<V> + From<Vec<u8>>,
+    where
+        V: Encode + Decode<V> + From<Vec<u8>>,
 {
     pub(crate) fn new() -> Indexer<V> {
         Indexer { store: Trie::new() }
@@ -57,8 +58,8 @@ where
 }
 
 impl<V> Persisted<V> for Indexer<V>
-where
-    V: Encode + Decode<V> + From<Vec<u8>> + Display,
+    where
+        V: Encode + Decode<V> + From<Vec<u8>> + Display,
 {
     fn save(&mut self, path: &str) -> Result<bool> {
         let fp = OpenOptions::new()
@@ -148,8 +149,8 @@ where
 }
 
 impl<V> Index<V> for Indexer<V>
-where
-    V: Encode + Decode<V> + From<Vec<u8>>,
+    where
+        V: Encode + Decode<V> + From<Vec<u8>>,
 {
     fn get(&self, key: &Vec<u8>) -> Option<&V> {
         self.store.get(key)
@@ -211,7 +212,6 @@ fn radix_tree() {
 
     let ok = tree.save(file_path.to_str().unwrap()).unwrap();
     assert!(ok);
-
 }
 
 #[test]

@@ -2,7 +2,7 @@ use crate::data_file::DataFile;
 use crate::entry::Entry;
 use crate::error::Result;
 use crate::hint::Hint;
-use crate::radix_tree::{Index, Indexer, Persisted};
+use crate::radix_tree::{Index, Indexer};
 use crate::{BitCask, UnexpectedError};
 use std::collections::HashMap;
 use std::fs::read_dir;

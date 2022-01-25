@@ -11,6 +11,8 @@ use std::ptr::write_bytes;
 pub struct MetaData {
     pub(crate) index_up_to_date: bool,
     pub(crate) reclaimable_space: u64,
+    pub(crate) total_space_used: u64,
+    pub(crate) dirty_space: u64,
 }
 
 impl MetaData {
@@ -34,10 +36,7 @@ impl MetaData {
         let p = Path::new(path).join(Self::NAME);
         if !p.exists() {
             debug!("not found the {:?}, create a new", p.as_os_str());
-            return Ok(MetaData {
-                index_up_to_date: false,
-                reclaimable_space: 0,
-            });
+            return Ok(MetaData::default());
         }
         Self::load(p)
     }

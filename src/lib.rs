@@ -38,7 +38,7 @@ use std::fs;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Sender, TryRecvError};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
@@ -49,19 +49,41 @@ pub struct BitCask {
     tx: Option<Sender<()>>,
 }
 
-#[derive(Default)]
-pub struct Stats {
-    total_sz: u64,
-}
-
-impl Stats {
-    fn clear(&mut self) {
-        self.total_sz = 0;
-    }
-}
-
 trait MergeProcessor {
     fn process(&mut self) -> Result<()>;
+}
+
+// TODO optimize auto merge
+fn merge_ticker(bitcask: BitCask, rx: Receiver<()>) {
+    let tid = std::thread::current().id().as_u64();
+    loop {
+        let ok = rx.try_recv();
+        if ok.is_ok() {
+            info!(
+                "receive a exit signer, exited merge at backend, tid: {}",
+                tid
+            );
+            return;
+        }
+        if ok.is_err() {
+            if ok.unwrap_err() == TryRecvError::Disconnected {
+                info!(
+                    "receive a exit signer, exited merge at backend, tid: {}",
+                    tid
+                );
+                return;
+            }
+            continue;
+        }
+        info!("start to merge at backend, tid: {}", tid);
+        if let Err(err) = bitcask.merge() {
+            error!("failed to merge at backend, tid: {}, err: {}", tid, err);
+        } else {
+            info!("end to merge at backend, tid: {}", tid);
+        }
+        sleep(Duration::from_secs(10));
+    }
+    info!("finish call Once, tid: {}", tid);
 }
 
 impl BitCask {
@@ -76,39 +98,14 @@ impl BitCask {
         let _bitcask = bitcask.clone();
         if cfg.is_some() && cfg.unwrap().auto_merge {
             info!("auto merge at backend");
-            // TODO optimize auto merge
             spawn(move || {
-                loop {
-                    let ok = rx.try_recv();
-                    if ok.is_ok() {
-                        info!(
-                            "receive a exit signer, exited merge at backend, tid: {}",
-                            std::thread::current().id().as_u64()
-                        );
-                        return;
-                    }
-                    if ok.is_err() {
-                        if ok.unwrap_err() == TryRecvError::Disconnected {
-                            info!(
-                                "receive a exit signer, exited merge at backend, tid: {}",
-                                std::thread::current().id().as_u64()
-                            );
-                            return;
-                        }
-                        continue;
-                    }
-                    info!("start to merge at backend");
-                    if let Err(err) = _bitcask.merge() {
-                        error!("failed to merge at backend, err: {}", err);
-                    } else {
-                        info!("end to merge at backend");
-                    }
-                    sleep(Duration::from_secs(10));
-                }
-                info!("finish call Once");
+                merge_ticker(_bitcask, rx);
             });
         }
-
+        info!(
+            "welcome to use bitcask: {}",
+            path.join("bitcask").to_string_lossy()
+        );
         Ok(bitcask)
     }
 
@@ -142,6 +139,7 @@ impl BitCask {
         let hint = bc.put(key.clone(), value, ttl)?;
         bc.metadata.index_up_to_date = false;
         if bc.hint_index.get(&key).is_some() {
+            // every put yields space
             bc.metadata.reclaimable_space += hint.size;
         }
         bc.hint_index.insert(key, hint);
@@ -210,7 +208,6 @@ struct BitCaskCore {
     config: Config,
     path: String,
     metadata: MetaData,
-    stats: RefCell<Stats>,
 }
 
 impl BitCaskCore {
@@ -260,7 +257,6 @@ impl BitCaskCore {
             config: cfg,
             path: base_dir,
             metadata: meta,
-            stats: RefCell::new(Stats::default()),
         }
     }
 
@@ -346,7 +342,10 @@ impl BitCaskCore {
             entry_sz as u64,
             expiry,
         );
-        // debug!("end put {}", hint);
+        self.metadata.total_space_used += entry_sz as u64;
+        if value.is_empty() {
+            self.metadata.dirty_space += entry_sz as u64;
+        }
         Ok(hint)
     }
 
@@ -369,7 +368,6 @@ impl BitCaskCore {
         {
             self.metadata.index_up_to_date = true;
             self.metadata.reclaimable_space = 0;
-            *self.stats.borrow_mut() = Stats::default();
         }
         self.reopen()
     }
@@ -431,7 +429,6 @@ impl BitCaskCore {
         self.load_hints(&mut data_files, last_file_id)?;
         self.curr = Some(DataFile::new(last_file_id, self.path.clone(), false));
         self.datafiles = data_files;
-        self.stats.borrow_mut().clear();
         debug!("reopen bitcask, the last file id is {}", last_file_id);
         Ok(())
     }
@@ -586,22 +583,6 @@ impl MergeProcessor for BitCaskCore {
             let hint = self.put(key.clone(), entry.value.clone(), entry.expiry)?;
             self.hint_index.insert(key.clone(), hint.clone());
             assert_eq!(hint.size, sz);
-            {
-                // sure check
-                let new_value = self.get(&key).unwrap();
-                assert!(!new_value.is_empty());
-                assert_eq!(entry.value, new_value);
-                let new_hint = self.hint_index.get(&key).unwrap().clone();
-                assert!(new_hint.file_id > *oldest);
-            }
-
-            {
-                self.metadata.index_up_to_date = false;
-                if self.hint_index.get(&key).is_some() {
-                    self.metadata.reclaimable_space += hint.size;
-                }
-                self.hint_index.insert(key, hint);
-            }
             debug!("reput the key: {:?}, old-file_id: {}, old-offset: {}, file_id:{}, offset: {}, size: {}, expiry: {}",&hex_key, oldest, offset, last_file_id, last_offset, sz, entry.expiry);
         }
         // delete the merge file
