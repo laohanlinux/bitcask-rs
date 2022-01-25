@@ -81,7 +81,7 @@ impl Decode<Hint> for Hint {
             }
         };
         let expire_hi = item.file_id >> 63;
-        item.file_id = item.file_id & !(1 << 63);
+        item.file_id = item.file_id & 0x_7FFF_FFFF_FFFF_FFFF;
         item.offset = fs
             .read_u64::<BigEndian>()
             .map_err(|err| UnexpectedError(err.to_string()))?;
@@ -104,10 +104,8 @@ impl Encode for Hint {
         if expire <= 0 {
             buffer_sz -= 8;
         } else {
-            file_id = self.file_id | (1 << 63);
-            println!("file_id {}", file_id);
+            file_id = self.file_id | 0x_8000_0000_0000_0000;
         }
-        println!("file_id {}", file_id);
         let mut cursor = Cursor::new(Vec::with_capacity(buffer_sz as usize));
         cursor
             .write_u64::<BigEndian>(file_id)
@@ -132,8 +130,10 @@ impl Encode for Hint {
 
 #[test]
 fn hint_decode_encode() {
+    use rand::random;
     for i in 0..100000 {
-        let hint = Hint::new(13690250467298864845, 100000, 1 << 10, chrono::Utc::now().timestamp());
+        let file_id = random::<u32>() as u64;
+        let hint = Hint::new(file_id, 100000, 1 << 10, chrono::Utc::now().timestamp());
         if hint.file_id == u64::MAX {
             continue;
         }
