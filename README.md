@@ -1,4 +1,5 @@
 # bitcask-rs
+![example workflow name](https://github.com/laohanlinux/bitcask-rs/workflows/Rust/badge.svg)
 
 ```rust
 use bitcask::BitCask;
