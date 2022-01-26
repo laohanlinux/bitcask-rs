@@ -14,6 +14,9 @@ pub struct Config {
     pub db_version: u32,
     pub check_sum_at_get_key: bool,
     pub auto_merge: bool,
+    pub auto_merge_interval_check: u64,
+    pub auto_merge_dirty_used: u64,
+    pub auto_merge_dirty_used_rate: f64,
 }
 
 impl Config {
@@ -60,6 +63,21 @@ impl Config {
         self.auto_merge = auto_merge;
         self
     }
+
+    pub fn auto_merge_interval_check(mut self, interval: u64) -> Self {
+        self.auto_merge_interval_check = interval;
+        self
+    }
+
+    pub fn auto_merge_interval_dirty_used(mut self, dirty_used: u64) -> Self {
+        self.auto_merge_dirty_used = dirty_used;
+        self
+    }
+
+    pub fn auto_merge_dirty_used_rate(mut self, rate: f64) -> Self {
+        self.auto_merge_dirty_used_rate = rate;
+        self
+    }
 }
 
 impl Default for Config {
@@ -68,11 +86,14 @@ impl Default for Config {
             max_data_file_size: 1 << 20,
             max_key_size: 1 << 10,
             max_value_size: 1 << 20,
-            sync: true,
+            sync: false,
             auto_recovery: true,
             db_version: 1,
             check_sum_at_get_key: false,
             auto_merge: false,
+            auto_merge_interval_check: 60,
+            auto_merge_dirty_used: 0,
+            auto_merge_dirty_used_rate: 0.0,
         }
     }
 }

@@ -15,9 +15,9 @@ mod key_value;
 mod metadata;
 mod radix_tree;
 mod recover;
+mod tests;
 mod tests_util;
 mod util;
-use std::ops::Sub;
 
 use crate::config::Config;
 use crate::data_file::{load_data_files, DataFile};
@@ -29,6 +29,9 @@ use crate::metadata::MetaData;
 use crate::radix_tree::{Index, Indexer, Persisted};
 use crate::recover::check_and_recover;
 use crate::util::load_index_from_data_file;
+use crossbeam::sync::WaitGroup;
+use crossbeam_channel::{select, Receiver, Sender};
+use fslock::LockFile;
 use kv_log_macro::{debug, error, info};
 use std::borrow::Borrow;
 use std::cell::RefCell;
@@ -36,9 +39,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::fs::{remove_file, rename, File, OpenOptions};
+use std::ops::Sub;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::thread::{sleep, spawn, JoinHandle};
 use std::time::{Duration, Instant};
@@ -49,79 +52,81 @@ pub struct BitCask {
     tx: Option<Sender<()>>,
 }
 
-#[derive(Default)]
-pub struct Stats {
-    total_sz: u64,
-}
-
-impl Stats {
-    fn clear(&mut self) {
-        self.total_sz = 0;
-    }
-}
-
 trait MergeProcessor {
     fn process(&mut self) -> Result<()>;
+}
+
+// TODO optimize auto merge
+fn merge_ticker(bitcask: BitCask, rx: Receiver<()>, cfg: Config) {
+    let tid = std::thread::current().id().as_u64();
+    loop {
+        let interval = crossbeam_channel::after(Duration::from_secs(cfg.auto_merge_interval_check));
+        select! {
+            recv(interval) -> msg => {
+                info!("receive a merge ticker");
+            },
+            recv(rx) -> ch => {
+                 info!(
+                    "receive a exit signer, exited merge at backend, tid: {}",
+                    tid
+                );
+                return;
+            }
+        }
+        let mut execute_merge = false;
+        let metadata = bitcask.lc().metadata.clone();
+        if cfg.auto_merge_dirty_used > 0 && metadata.dirty_space > cfg.auto_merge_dirty_used {
+            execute_merge = true;
+        }
+        if cfg.auto_merge_dirty_used_rate > 0.0
+            && metadata.total_space_used > 0
+            && cfg.auto_merge_dirty_used_rate
+                < (metadata.dirty_space as f64 / metadata.total_space_used as f64)
+        {
+            execute_merge = true;
+        }
+        if !execute_merge {
+            info!("skip merge, tid: {}", tid);
+            continue;
+        }
+        info!("start to merge at backend, tid: {}", tid);
+        if let Err(err) = bitcask.merge() {
+            error!("failed to merge at backend, tid: {}, err: {}", tid, err);
+        } else {
+            info!("end to merge at backend, tid: {}", tid);
+        }
+    }
+    info!("finish call Once, tid: {}", tid);
 }
 
 impl BitCask {
     pub fn open(path: &Path, cfg: impl Into<Option<Config>>) -> Result<Self> {
         let cfg = cfg.into();
         let bc = BitCaskCore::open(path, cfg.clone())?;
-        let (tx, rx) = channel();
+        let (tx, rx) = crossbeam_channel::bounded::<()>(0);
         let bitcask = BitCask {
             inner: Arc::new(Mutex::new(bc)),
             tx: Some(tx),
         };
         let _bitcask = bitcask.clone();
-        if cfg.is_some() && cfg.unwrap().auto_merge {
+        if cfg.is_some() && cfg.as_ref().unwrap().auto_merge {
             info!("auto merge at backend");
-            // TODO optimize auto merge
             spawn(move || {
-                loop {
-                    let ok = rx.try_recv();
-                    if ok.is_ok() {
-                        info!(
-                            "receive a exit signer, exited merge at backend, tid: {}",
-                            std::thread::current().id().as_u64()
-                        );
-                        return;
-                    }
-                    if ok.is_err() {
-                        if ok.unwrap_err() == TryRecvError::Disconnected {
-                            info!(
-                                "receive a exit signer, exited merge at backend, tid: {}",
-                                std::thread::current().id().as_u64()
-                            );
-                            return;
-                        }
-                        continue;
-                    }
-                    info!("start to merge at backend");
-                    if let Err(err) = _bitcask.merge() {
-                        error!("failed to merge at backend, err: {}", err);
-                    } else {
-                        info!("end to merge at backend");
-                    }
-                    sleep(Duration::from_secs(10));
-                }
-                info!("finish call Once");
+                merge_ticker(_bitcask, rx, cfg.unwrap());
             });
         }
-
+        info!(
+            "welcome to use bitcask: {}",
+            path.join("bitcask").to_string_lossy()
+        );
         Ok(bitcask)
     }
 
     // don't forgive to invoke `close` if auto merge
     pub fn close(&self) -> Result<()> {
         if let Some(ref tx) = self.tx {
-            while tx.send(()).is_ok() {
-                sleep(Duration::from_secs(1));
-                info!(
-                    "wait merge job closed, tid: {}",
-                    std::thread::current().id().as_u64()
-                );
-            }
+            info!("wait merge job exit");
+            tx.send(());
             info!("exited succeed");
         }
         Ok(())
@@ -141,9 +146,6 @@ impl BitCask {
         }
         let hint = bc.put(key.clone(), value, ttl)?;
         bc.metadata.index_up_to_date = false;
-        if bc.hint_index.get(&key).is_some() {
-            bc.metadata.reclaimable_space += hint.size;
-        }
         bc.hint_index.insert(key, hint);
         Ok(())
     }
@@ -168,9 +170,7 @@ impl BitCask {
 
     pub fn delete(&self, key: &Vec<u8>) -> Result<()> {
         let mut bc = self.lc();
-        if let Some((file_id, sz)) = bc.hint_index.get(key).map(|hint| (hint.file_id, hint.size)) {
-            bc.metadata.reclaimable_space += sz;
-        }
+        bc.put(key.clone(), vec![], None)?;
         bc.hint_index.remove(key);
         Ok(())
     }
@@ -210,7 +210,7 @@ struct BitCaskCore {
     config: Config,
     path: String,
     metadata: MetaData,
-    stats: RefCell<Stats>,
+    pid_lock: LockFile,
 }
 
 impl BitCaskCore {
@@ -221,6 +221,13 @@ impl BitCaskCore {
             Err(err) if err.kind() == ::std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(UnexpectedError(err.to_string())),
         }
+        let mut pid_lock = LockFile::open(&Path::new(&path).join("lock"))
+            .map_err(|err| UnexpectedError(err.to_string()))?;
+        pid_lock
+            .lock()
+            .map_err(|err| UnexpectedError(err.to_string()))?;
+        info!("ready to open a new db connection");
+
         let mut cfg = cfg.into();
         if cfg.is_none() {
             let ok = fs::try_exists(Path::new(path.as_str()).join("config.toml"))
@@ -240,18 +247,18 @@ impl BitCaskCore {
             check_and_recover(path.as_str(), &cfg)?;
             debug!("succeed to auto recover");
         }
-
-        let mut bc = BitCaskCore::new(path, index, None, meta, cfg);
+        let mut bc = BitCaskCore::new(path, index, None, meta, cfg, pid_lock);
         bc.reopen()?;
         Ok(bc)
     }
 
-    pub fn new(
+    fn new(
         base_dir: String,
         hint: Indexer<Hint>,
         wt_data_file: Option<DataFile>,
         meta: MetaData,
         cfg: Config,
+        lock: LockFile,
     ) -> Self {
         BitCaskCore {
             hint_index: hint,
@@ -260,7 +267,7 @@ impl BitCaskCore {
             config: cfg,
             path: base_dir,
             metadata: meta,
-            stats: RefCell::new(Stats::default()),
+            pid_lock: lock,
         }
     }
 
@@ -346,15 +353,17 @@ impl BitCaskCore {
             entry_sz as u64,
             expiry,
         );
-        // debug!("end put {}", hint);
+        self.metadata.total_space_used += entry_sz as u64;
+        if value.is_empty() {
+            self.metadata.dirty_space += entry_sz as u64;
+        }
         Ok(hint)
     }
 
-    // TODO maybe very heap
     fn delete_all(&mut self) -> Result<()> {
-        self.hint_index.clear();
         let curr_file = { self.curr.take().unwrap().path_name() };
-        remove_file(curr_file)?;
+        remove_file(&curr_file)?;
+        info!("remove current file: {}", curr_file);
         let data_files = self
             .datafiles
             .values()
@@ -364,12 +373,22 @@ impl BitCaskCore {
             self.datafiles.clear();
         }
         for data_file in data_files {
-            remove_file(data_file).map_err(|err| UnexpectedError(err.to_string()))?;
+            remove_file(&data_file).map_err(|err| UnexpectedError(err.to_string()))?;
+            info!("remove data_file: {}", data_file);
+        }
+        {
+            self.hint_index.clear();
+            let hint_file = Path::new(self.path.as_str()).join(Hint::HINT_FILE);
+            remove_file(&hint_file)?;
+            info!("remove hint file: {}", hint_file.to_string_lossy());
         }
         {
             self.metadata.index_up_to_date = true;
-            self.metadata.reclaimable_space = 0;
-            *self.stats.borrow_mut() = Stats::default();
+            self.metadata.total_space_used = 0;
+            self.metadata.dirty_space = 0;
+            let meta_file = Path::new(self.path.as_str()).join(MetaData::NAME);
+            remove_file(&meta_file).unwrap();
+            info!("remove metadata file: {}", meta_file.to_string_lossy());
         }
         self.reopen()
     }
@@ -431,7 +450,6 @@ impl BitCaskCore {
         self.load_hints(&mut data_files, last_file_id)?;
         self.curr = Some(DataFile::new(last_file_id, self.path.clone(), false));
         self.datafiles = data_files;
-        self.stats.borrow_mut().clear();
         debug!("reopen bitcask, the last file id is {}", last_file_id);
         Ok(())
     }
@@ -502,12 +520,12 @@ impl BitCaskCore {
 
 impl Drop for BitCaskCore {
     fn drop(&mut self) {
+        self.metadata.index_up_to_date = true;
         if let Err(err) = self.save_indexes() {
             error!("failed to save indexes, err: {}", err);
         }
-        self.metadata.index_up_to_date = true;
-        if let Err(err) = self.metadata.save(&self.path) {
-            error!("failed to save metadata: err: {}", err);
+        if let Err(err) = self.pid_lock.unlock() {
+            error!("failed to unlock pid lock, err: {}", err);
         }
         debug!("bitcask core had drop");
     }
@@ -586,22 +604,6 @@ impl MergeProcessor for BitCaskCore {
             let hint = self.put(key.clone(), entry.value.clone(), entry.expiry)?;
             self.hint_index.insert(key.clone(), hint.clone());
             assert_eq!(hint.size, sz);
-            {
-                // sure check
-                let new_value = self.get(&key).unwrap();
-                assert!(!new_value.is_empty());
-                assert_eq!(entry.value, new_value);
-                let new_hint = self.hint_index.get(&key).unwrap().clone();
-                assert!(new_hint.file_id > *oldest);
-            }
-
-            {
-                self.metadata.index_up_to_date = false;
-                if self.hint_index.get(&key).is_some() {
-                    self.metadata.reclaimable_space += hint.size;
-                }
-                self.hint_index.insert(key, hint);
-            }
             debug!("reput the key: {:?}, old-file_id: {}, old-offset: {}, file_id:{}, offset: {}, size: {}, expiry: {}",&hex_key, oldest, offset, last_file_id, last_offset, sz, entry.expiry);
         }
         // delete the merge file
@@ -622,391 +624,5 @@ impl MergeProcessor for BitCaskCore {
             chrono::Utc::now().sub(start).num_milliseconds()
         );
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{BitCask, Config, DataFile, Entry, Hint, Index, Indexer, Persisted};
-    use env_logger::{Env, Target};
-    use log::{debug, info, log_enabled};
-    use rand::random;
-    use std::collections::HashMap;
-    use std::fs::{remove_dir_all, OpenOptions};
-    use std::io::Cursor;
-    use std::path::Path;
-    use std::str::Chars;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc::channel;
-    use std::thread::{sleep, spawn};
-    use std::time::{Duration, Instant};
-    use tempdir::TempDir;
-
-    #[test]
-    fn bitcask() {
-        let tmp = mock(None);
-        let cfg = Config::default();
-        let bitcask = BitCask::open(Path::new(&tmp), Some(cfg));
-        assert!(bitcask.is_ok());
-    }
-
-    #[test]
-    fn put() {
-        let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
-        let bitcask = BitCask::open(Path::new(&tmp), Some(cfg)).unwrap();
-        for i in 1..=10000 {
-            let ok = bitcask
-                .put(format!("{}", i).into_bytes(), Vec::from(r#"bar"#))
-                .is_ok();
-            assert!(ok);
-        }
-        assert_eq!(bitcask.count(), 10000);
-    }
-
-    #[test]
-    fn put_ttl() {
-        let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
-        let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-        for i in 1..=10000 {
-            bitcask
-                .put_with_ttl(format!("{}", i).into_bytes(), Vec::from(r#"bar"#), 60)
-                .unwrap();
-        }
-        assert_eq!(bitcask.count(), 10000);
-    }
-
-    #[test]
-    fn get_and_delete() {
-        let n = 10000;
-        let bitcask = generate_n(n, 10);
-        for i in 1..n {
-            let value = bitcask.get(&format!("{}", i).into_bytes());
-            assert!(value.is_some());
-        }
-        for i in 1..n {
-            let ok = bitcask.delete(&format!("{}", i).into_bytes());
-            assert!(ok.is_ok());
-        }
-        for i in 1..n {
-            let value = bitcask.get(&format!("{}", i).into_bytes());
-            assert!(value.is_none());
-        }
-    }
-
-    #[test]
-    fn delete_all() {
-        let n = 3;
-        let bitcask = generate_n(n, 3);
-        for i in 1..n {
-            let value = bitcask.get(&format!("{}", i).into_bytes());
-            assert!(value.is_some());
-        }
-        let ok = bitcask.delete_all();
-        assert!(ok.is_ok());
-        (1..n).into_iter().for_each(|i| {
-            let value = bitcask.get(&format!("{}", i).into_bytes());
-            assert!(value.is_none());
-        });
-        // reopen
-        for i in 1..n {
-            let mut value = vec![];
-            value.extend(::std::iter::repeat(0).take(1 << 10));
-            bitcask
-                .put_with_ttl(format!("{}", i).into_bytes(), value, 60)
-                .unwrap();
-        }
-        for i in 1..n {
-            let value = bitcask.get(&format!("{}", i).into_bytes());
-            assert!(value.is_some());
-        }
-    }
-
-    #[test]
-    fn exists() {
-        let mut bitcask = generate_n(10000, 3);
-        let exists = bitcask.exists(&format!("{}", 1).into_bytes());
-        assert_eq!(exists, true);
-        let exists = bitcask.exists(&format!("{}", 100001).into_bytes());
-        assert_eq!(exists, false);
-        sleep(Duration::from_secs(4));
-        let exist = bitcask.exists(&format!("{}", 1).into_bytes());
-        assert_eq!(exist, false);
-    }
-
-    #[test]
-    fn rate() {
-        use std::time::{Duration, Instant};
-        let tmp = mock(None);
-        let mut cfg = Config::default().auto_sync(false);
-        let mut bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-        let timestamp = Instant::now();
-        let n = 100000;
-        for i in 1..=n {
-            let mut value = Vec::from(r#"bar"#);
-            value.extend(::std::iter::repeat(0).take(1 << 10));
-            bitcask
-                .put_with_ttl(format!("{}", i).into_bytes(), value, 60)
-                .unwrap();
-        }
-        debug!(
-            "cost time: {} million, count: {}, dir: {}",
-            timestamp.elapsed().as_millis(),
-            n,
-            tmp
-        );
-    }
-
-    #[test]
-    fn recover() {
-        let tmp = mock(None);
-        let mut n = 1000;
-        {
-            let mut cfg = Config::default().auto_sync(false).auto_merge(true);
-            let mut bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-            for i in 1..=n {
-                let key = format!("{:0>10}", i).into_bytes();
-                let mut value = generate_n_sz_buffer(1 << 10);
-                bitcask.put_with_ttl(key, value, 60).unwrap();
-            }
-            assert_eq!(bitcask.count(), n);
-            assert!(bitcask.close().is_ok());
-        }
-
-        // recover
-        {
-            let mut cfg = Config::default().auto_sync(false).auto_merge(true);
-            let mut bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-            assert_eq!(bitcask.count(), n);
-            assert!(bitcask.close().is_ok());
-        }
-        // delete it
-        let mut hint1 = HashMap::new();
-        {
-            let cfg = Config::default().auto_sync(false).auto_merge(true);
-            let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-            for i in 1..=n {
-                let del_key = random::<usize>() % n;
-                let del_key = format!("{:0>10}", del_key).into_bytes();
-                bitcask.delete(&del_key);
-                debug!("delete key: {}", String::from_utf8_lossy(&del_key));
-            }
-            let ok = bitcask.count() < n;
-            n = bitcask.count();
-            assert!(ok);
-            hint1 = bitcask
-                .lc()
-                .hint_index
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<HashMap<_, _>>();
-            assert!(bitcask.close().is_ok());
-        }
-        // recover again
-        let mut hint2 = HashMap::new();
-        {
-            let mut cfg = Config::default().auto_sync(false).auto_merge(true);
-            let mut bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-            let count = bitcask.count();
-            hint2 = bitcask
-                .lc()
-                .hint_index
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<HashMap<_, _>>();
-            // assert_eq!(hint1.len(), hint2.len());
-            for (key, value) in hint2 {
-                let ok = hint1.get(&key).is_some();
-                if !ok {
-                    println!("diff, {}", String::from_utf8_lossy(&key));
-                }
-            }
-            assert_eq!(count, n);
-            assert!(bitcask.close().is_ok());
-        }
-    }
-
-    #[test]
-    fn merge1() {
-        let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
-        {
-            let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-            // batch write entries
-            // [1, 1024] [1025, 2048], [2049, 4096]
-            let entries = generate_1m_entry();
-            let entries = entries[0..4096].to_vec();
-            for entry in &entries {
-                bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
-            }
-            for i in 1..=1 {
-                bitcask.merge();
-            }
-            let mut final_entries = bitcask.lc().entries();
-            final_entries.sort_by(|a, b| a.key.cmp(b.key.as_ref()));
-            assert_eq!(entries.len(), final_entries.len());
-            for i in 0..entries.len() {
-                assert_eq!(format!("{}", entries[i]), format!("{}", final_entries[i]));
-            }
-        }
-    }
-
-    #[test]
-    fn merge_with_delete() {
-        let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
-        let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-        let entries = generate_1m_entry();
-        let num = entries.len();
-
-        for entry in &entries {
-            bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
-        }
-
-        for i in 0..num {
-            let key = random::<usize>() % num;
-            let key = format!("{:0>10}", key).into_bytes();
-            bitcask.delete(&key);
-        }
-        bitcask.merge().unwrap();
-    }
-
-    #[test]
-    fn merge_auto() {
-        let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
-        let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-        let entries = generate_1m_entry();
-        let num = entries.len();
-
-        for entry in &entries {
-            bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
-        }
-        sleep(Duration::from_secs(5));
-        bitcask.close();
-    }
-
-    #[test]
-    fn generate_data() {
-        mock(None);
-        generate_1m_entry();
-    }
-
-    #[test]
-    fn merge_random() {
-        let tmp = mock(None);
-        remove_dir_all(Path::new(&tmp));
-        let cfg = Config::default()
-            .auto_sync(false)
-            .set_check_sum_at_get_key(true);
-        let bitcask = BitCask::open(Path::new(&tmp), cfg.clone()).unwrap();
-        let entries = generate_1m_entry();
-        let num = entries.len();
-        for entry in &entries {
-            let ok = bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
-            assert!(ok.is_ok());
-        }
-        for i in 0..num {
-            let key = random::<usize>() % num;
-            let key = format!("{:0>10}", key).into_bytes();
-            let ok = bitcask.delete(&key);
-            assert!(ok.is_ok());
-        }
-        let final_entries = bitcask.lc().entries();
-        for i in 0..20 {
-            bitcask.merge().unwrap();
-        }
-        let after_entries = bitcask.lc().entries();
-        assert_eq!(final_entries.len(), after_entries.len());
-    }
-
-    #[test]
-    fn merge_recycle() {
-        let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
-        let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
-        let entries = generate_1m_entry();
-        for entry in entries {
-            bitcask
-                .put_with_ttl(entry.key, entry.value, entry.expiry)
-                .unwrap();
-        }
-        for i in 0..50 {
-            bitcask.merge().unwrap();
-        }
-        let final_entries = bitcask.lc().entries();
-    }
-
-    fn mock(prefix: impl Into<Option<String>>) -> String {
-        use log::LevelFilter;
-        use std::io::Write;
-        // let mut builder = env_logger::builder();
-        // builder.is_test(true).format_module_path(true).format(|buf, record|
-        //     writeln!(buf, "tid: {}, {}", std::thread::current().id().as_u64(), record.args())).parse_env(Env::new().default_filter_or("info"));
-        env_logger::try_init_from_env(Env::new().default_filter_or("info"));
-        let prefix = prefix.into();
-        return if let Some(prefix) = prefix {
-            prefix.to_owned()
-        } else {
-            String::from(
-                tempdir::TempDir::new("bitcask")
-                    .unwrap()
-                    .path()
-                    .to_string_lossy(),
-            )
-        };
-    }
-
-    fn generate_n(n: usize, ttl: i64) -> BitCask {
-        let tmp = mock(None);
-        let mut cfg = Config::default().auto_sync(false);
-        let bitcask = BitCask::open(tmp.as_ref(), cfg).unwrap();
-        for i in 1..n {
-            let mut value = vec![];
-            value.extend(::std::iter::repeat(0).take(1 << 10));
-            bitcask
-                .put_with_ttl(format!("{}", i).into_bytes(), value, ttl)
-                .unwrap();
-        }
-        bitcask
-    }
-
-    // create 1m * 10 entries, every entry is 1kb
-    fn generate_1m_entry() -> Vec<Entry> {
-        use rand::{distributions::Alphanumeric, Rng};
-        let mut entires = vec![];
-        let start = chrono::Utc::now();
-        let header_size = Entry::MATA_INFO_SIZE;
-        let kv = (1 << 10) - header_size;
-        let value = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(kv)
-            .map(char::from)
-            .collect::<String>()
-            .into_bytes();
-        for i in 1..=1024 * 10 {
-            let key = format!("{:0>10}", i).into_bytes();
-            let mut entry = Entry::new(vec![], vec![], 0);
-            entry.value = value.clone()[..(kv - key.len())].to_vec();
-            entry.key = key;
-            entires.push(entry);
-        }
-        debug!(
-            "generate data cost time: {} ms",
-            chrono::Utc::now().timestamp_millis() - start.timestamp_millis()
-        );
-        entires
-    }
-
-    fn generate_n_sz_buffer(n: usize) -> Vec<u8> {
-        use rand::{distributions::Alphanumeric, Rng};
-        let value = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(n)
-            .map(char::from)
-            .collect::<String>()
-            .into_bytes();
-        value
     }
 }

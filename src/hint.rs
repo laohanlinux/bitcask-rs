@@ -10,7 +10,6 @@ use log::info;
 // `Item` represents the location of the value on disk. This is used by the
 // internal Adaptive Radix Tree to hold an in-memory structure mapping keys to
 // locations on disk of where the value(s) can be read from.(Only one Hint, not same to raw bitcask)
-// TODO: optimize expire, if expire = 0 that should be not encode, maybe can add a extra field to flag it,
 // or use other filed high bit to flag it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub(crate) struct Hint {
