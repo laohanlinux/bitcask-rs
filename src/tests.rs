@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::{BitCask, Config, DataFile, Entry, Hint, Index, Indexer, Persisted};
+    use crossbeam_channel::select;
     use env_logger::{Env, Target};
     use log::{debug, info, log_enabled};
     use rand::random;
@@ -18,9 +19,12 @@ mod tests {
     #[test]
     fn bitcask() {
         let tmp = mock(None);
-        let cfg = Config::default();
-        let bitcask = BitCask::open(Path::new(&tmp), Some(cfg));
+        let cfg = Config::default()
+            .auto_merge(true)
+            .auto_merge_interval_check(1);
+        let bitcask = BitCask::open(Path::new(&tmp), cfg);
         assert!(bitcask.is_ok());
+        bitcask.unwrap().close();
     }
 
     #[test]
@@ -134,6 +138,7 @@ mod tests {
     #[test]
     fn recover() {
         let tmp = mock(None);
+        info!("start to recover test");
         let mut n = 1000;
         {
             let mut cfg = Config::default().auto_sync(false).auto_merge(true);
@@ -141,12 +146,13 @@ mod tests {
             for i in 1..=n {
                 let key = format!("{:0>10}", i).into_bytes();
                 let mut value = generate_n_sz_buffer(1 << 10);
-                bitcask.put_with_ttl(key, value, 60).unwrap();
+                bitcask.put(key, value).unwrap();
             }
             assert_eq!(bitcask.count(), n);
             assert!(bitcask.close().is_ok());
         }
 
+        debug!("---------------");
         // recover
         {
             let mut cfg = Config::default().auto_sync(false).auto_merge(true);
@@ -154,6 +160,7 @@ mod tests {
             assert_eq!(bitcask.count(), n);
             assert!(bitcask.close().is_ok());
         }
+        debug!("---------------");
         // delete it
         let mut hint1 = HashMap::new();
         {
@@ -163,7 +170,7 @@ mod tests {
                 let del_key = random::<usize>() % n;
                 let del_key = format!("{:0>10}", del_key).into_bytes();
                 bitcask.delete(&del_key);
-                debug!("delete key: {}", String::from_utf8_lossy(&del_key));
+                // debug!("delete key: {}", String::from_utf8_lossy(&del_key));
             }
             let ok = bitcask.count() < n;
             n = bitcask.count();
@@ -248,15 +255,16 @@ mod tests {
     #[test]
     fn merge_auto() {
         let tmp = mock(None);
-        let cfg = Config::default().auto_sync(false);
+        let cfg = Config::default()
+            .auto_merge(true)
+            .auto_merge_interval_check(3);
         let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
         let entries = generate_1m_entry();
         let num = entries.len();
-
         for entry in &entries {
             bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
         }
-        sleep(Duration::from_secs(5));
+        info!("finished put");
         bitcask.close();
     }
 
@@ -338,6 +346,42 @@ mod tests {
         };
     }
 
+    fn mock2(prefix: impl Into<Option<String>>, flag: String) -> String {
+        use env_logger::Builder;
+        use log::LevelFilter;
+        use std::io::Write;
+
+        {
+            let mut builder = Builder::from_default_env();
+            builder
+                .format(move |buf, record| {
+                    writeln!(
+                        buf,
+                        "[f: {}, {} {} {}:{}] {}",
+                        flag,
+                        chrono::Local::now(),
+                        record.level(),
+                        record.file_static().unwrap(),
+                        record.line().unwrap(),
+                        record.args()
+                    )
+                })
+                .filter(None, LevelFilter::Debug)
+                .try_init();
+        }
+
+        let prefix = prefix.into();
+        return if let Some(prefix) = prefix {
+            prefix.to_owned()
+        } else {
+            String::from(
+                tempdir::TempDir::new("bitcask")
+                    .unwrap()
+                    .path()
+                    .to_string_lossy(),
+            )
+        };
+    }
     fn generate_n(n: usize, ttl: i64) -> BitCask {
         let tmp = mock(None);
         let mut cfg = Config::default().auto_sync(false);

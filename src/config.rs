@@ -86,7 +86,7 @@ impl Default for Config {
             max_data_file_size: 1 << 20,
             max_key_size: 1 << 10,
             max_value_size: 1 << 20,
-            sync: true,
+            sync: false,
             auto_recovery: true,
             db_version: 1,
             check_sum_at_get_key: false,

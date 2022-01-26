@@ -19,8 +19,6 @@ mod tests;
 mod tests_util;
 mod util;
 
-use std::ops::Sub;
-
 use crate::config::Config;
 use crate::data_file::{load_data_files, DataFile};
 use crate::entry::{Entry, CRC32};
@@ -31,7 +29,9 @@ use crate::metadata::MetaData;
 use crate::radix_tree::{Index, Indexer, Persisted};
 use crate::recover::check_and_recover;
 use crate::util::load_index_from_data_file;
+use crossbeam::sync::WaitGroup;
 use crossbeam_channel::{select, Receiver, Sender};
+use fslock::LockFile;
 use kv_log_macro::{debug, error, info};
 use std::borrow::Borrow;
 use std::cell::RefCell;
@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::fs::{remove_file, rename, File, OpenOptions};
+use std::ops::Sub;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once};
@@ -61,7 +62,9 @@ fn merge_ticker(bitcask: BitCask, rx: Receiver<()>, cfg: Config) {
     loop {
         let interval = crossbeam_channel::after(Duration::from_secs(cfg.auto_merge_interval_check));
         select! {
-            recv(interval) -> msg => {},
+            recv(interval) -> msg => {
+                info!("receive a merge ticker");
+            },
             recv(rx) -> ch => {
                  info!(
                     "receive a exit signer, exited merge at backend, tid: {}",
@@ -122,13 +125,8 @@ impl BitCask {
     // don't forgive to invoke `close` if auto merge
     pub fn close(&self) -> Result<()> {
         if let Some(ref tx) = self.tx {
-            while tx.send(()).is_ok() {
-                sleep(Duration::from_secs(1));
-                info!(
-                    "wait merge job closed, tid: {}",
-                    std::thread::current().id().as_u64()
-                );
-            }
+            info!("wait merge job exit");
+            tx.send(());
             info!("exited succeed");
         }
         Ok(())
@@ -212,6 +210,7 @@ struct BitCaskCore {
     config: Config,
     path: String,
     metadata: MetaData,
+    pid_lock: LockFile,
 }
 
 impl BitCaskCore {
@@ -222,6 +221,13 @@ impl BitCaskCore {
             Err(err) if err.kind() == ::std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(UnexpectedError(err.to_string())),
         }
+        let mut pid_lock = LockFile::open(&Path::new(&path).join("lock"))
+            .map_err(|err| UnexpectedError(err.to_string()))?;
+        pid_lock
+            .lock()
+            .map_err(|err| UnexpectedError(err.to_string()))?;
+        info!("ready to open a new db connection");
+
         let mut cfg = cfg.into();
         if cfg.is_none() {
             let ok = fs::try_exists(Path::new(path.as_str()).join("config.toml"))
@@ -241,8 +247,7 @@ impl BitCaskCore {
             check_and_recover(path.as_str(), &cfg)?;
             debug!("succeed to auto recover");
         }
-
-        let mut bc = BitCaskCore::new(path, index, None, meta, cfg);
+        let mut bc = BitCaskCore::new(path, index, None, meta, cfg, pid_lock);
         bc.reopen()?;
         Ok(bc)
     }
@@ -253,6 +258,7 @@ impl BitCaskCore {
         wt_data_file: Option<DataFile>,
         meta: MetaData,
         cfg: Config,
+        lock: LockFile,
     ) -> Self {
         BitCaskCore {
             hint_index: hint,
@@ -261,6 +267,7 @@ impl BitCaskCore {
             config: cfg,
             path: base_dir,
             metadata: meta,
+            pid_lock: lock,
         }
     }
 
@@ -516,6 +523,9 @@ impl Drop for BitCaskCore {
         self.metadata.index_up_to_date = true;
         if let Err(err) = self.save_indexes() {
             error!("failed to save indexes, err: {}", err);
+        }
+        if let Err(err) = self.pid_lock.unlock() {
+            error!("failed to unlock pid lock, err: {}", err);
         }
         debug!("bitcask core had drop");
     }
