@@ -28,7 +28,7 @@ use crate::hint::Hint;
 use crate::metadata::MetaData;
 use crate::radix_tree::{Index, Indexer, Persisted};
 use crate::recover::check_and_recover;
-use crate::util::load_index_from_data_file;
+use crate::util::{expire_hint, expire_key, load_index_from_data_file};
 use crossbeam::sync::WaitGroup;
 use crossbeam_channel::{select, Receiver, Sender};
 use fslock::LockFile;
@@ -459,13 +459,14 @@ impl BitCaskCore {
         data_files: &mut HashMap<u64, DataFile>,
         last_file_id: u64,
     ) -> Result<()> {
+        let expire_fn = expire_hint();
         // load hint files
         let found = self.hint_index.load(
             Path::new(self.path.as_str())
                 .join(Hint::HINT_FILE)
                 .to_string_lossy()
                 .as_ref(),
-            None::<fn(&Hint) -> bool>,
+            Some(expire_fn),
         )?;
         debug!("succeed to load hint, found: {}", found);
         // TODO: index_up_to_date: Why?
@@ -601,6 +602,15 @@ impl MergeProcessor for BitCaskCore {
             let entry = self.get_by_file_id(last_file_id, last_offset, sz)?;
             assert_eq!(&key, &entry.key);
             assert!(!entry.value.is_empty());
+            if entry.expiry > 0 && entry.expiry < chrono::Utc::now().timestamp() {
+                dirty += 1;
+                debug!("skip1 the expired key at merge, key: {:?}, old-file_id: {}, old-offset: {}, file_id:{}, offset: {}", &hex_key, oldest, offset, last_file_id, last_offset);
+                // remove it from hint_file
+                let exits = self.hint_index.remove(&key);
+                assert!(exits.is_some(), "it should not happen");
+                self.metadata.total_space_used -= entry.size() as u64;
+                continue;
+            }
             let hint = self.put(key.clone(), entry.value.clone(), entry.expiry)?;
             self.hint_index.insert(key.clone(), hint.clone());
             assert_eq!(hint.size, sz);

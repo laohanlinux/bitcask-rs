@@ -45,8 +45,8 @@ pub(crate) struct Indexer<V: Encode + Decode<V>> {
 }
 
 impl<V> Indexer<V>
-    where
-        V: Encode + Decode<V> + From<Vec<u8>>,
+where
+    V: Encode + Decode<V> + From<Vec<u8>>,
 {
     pub(crate) fn new() -> Indexer<V> {
         Indexer { store: Trie::new() }
@@ -58,8 +58,8 @@ impl<V> Indexer<V>
 }
 
 impl<V> Persisted<V> for Indexer<V>
-    where
-        V: Encode + Decode<V> + From<Vec<u8>> + Display,
+where
+    V: Encode + Decode<V> + From<Vec<u8>> + Display,
 {
     fn save(&mut self, path: &str) -> Result<bool> {
         let fp = OpenOptions::new()
@@ -149,8 +149,8 @@ impl<V> Persisted<V> for Indexer<V>
 }
 
 impl<V> Index<V> for Indexer<V>
-    where
-        V: Encode + Decode<V> + From<Vec<u8>>,
+where
+    V: Encode + Decode<V> + From<Vec<u8>>,
 {
     fn get(&self, key: &Vec<u8>) -> Option<&V> {
         self.store.get(key)
