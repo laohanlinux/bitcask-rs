@@ -7,7 +7,7 @@ use std::io::Bytes;
 use std::path::{Path, PathBuf};
 use std::ptr::write_bytes;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct MetaData {
     pub(crate) index_up_to_date: bool,
     pub(crate) total_space_used: u64,
