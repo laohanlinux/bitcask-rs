@@ -3,7 +3,9 @@ use crate::entry::Entry;
 use crate::error::BitCaskError::NoMoreData;
 use crate::error::{BitCaskError::UnexpectedError, Result};
 use crate::hint::Hint;
+use crate::mmap::{bind_mmap_and_write, MMapFile};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use kv_log_macro::info;
 use log::debug;
 use qp_trie::{Iter, IterMut, Trie};
 use serde::de::Unexpected::Bytes;
@@ -15,6 +17,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::thread::current;
 
 // TODO
 // 1: add async read/write
@@ -45,8 +48,8 @@ pub(crate) struct Indexer<V: Encode + Decode<V>> {
 }
 
 impl<V> Indexer<V>
-    where
-        V: Encode + Decode<V> + From<Vec<u8>>,
+where
+    V: Encode + Decode<V> + From<Vec<u8>>,
 {
     pub(crate) fn new() -> Indexer<V> {
         Indexer { store: Trie::new() }
@@ -58,15 +61,18 @@ impl<V> Indexer<V>
 }
 
 impl<V> Persisted<V> for Indexer<V>
-    where
-        V: Encode + Decode<V> + From<Vec<u8>> + Display,
+where
+    V: Encode + Decode<V> + From<Vec<u8>> + Display,
 {
     fn save(&mut self, path: &str) -> Result<bool> {
-        let fp = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
+        // let mut fp = OpenOptions::new()
+        //     .write(true)
+        //     .read(true)
+        //     .create(true)
+        //     .truncate(true)
+        //     .open(path)
+        //     .map_err(|err| UnexpectedError(err.to_string()))?;
+        let mut fp = mmap_storage::file::Storage::open(path)
             .map_err(|err| UnexpectedError(err.to_string()))?;
         let mut fp = BufWriter::new(fp);
         for (key, entry) in self.store.iter() {
@@ -149,8 +155,8 @@ impl<V> Persisted<V> for Indexer<V>
 }
 
 impl<V> Index<V> for Indexer<V>
-    where
-        V: Encode + Decode<V> + From<Vec<u8>>,
+where
+    V: Encode + Decode<V> + From<Vec<u8>>,
 {
     fn get(&self, key: &Vec<u8>) -> Option<&V> {
         self.store.get(key)
@@ -229,6 +235,7 @@ fn random_radix_tree() {
         index.remove(&format!("{}", i).into_bytes());
     }
     let dir = tests_util::sure_tmp_dir("index");
+    println!("totoal {}", index.count());
     let ok = index.save(&dir);
     assert!(ok.is_ok());
     let mut index2 = Indexer::new();

@@ -52,6 +52,8 @@ dependencies = [
  "hex",
  "kv-log-macro",
  "log",
+ "memmap",
+ "mmap-storage",
  "names",
  "qp-trie",
  "rand 0.8.4",
@@ -319,12 +321,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "308cc39be01b73d0d18f82a0e7b2a3df85245f84af96fdddc5d202d27e47b86a"
 
 [[package]]
+name = "memmap"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6585fd95e7bb50d6cc31e20d4cf9afb4e2ba16c5846fc76793f11218da9c475b"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "memoffset"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mmap-storage"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b3f88ccfbff394e0a1db675ebf0c9d3210f4498cce9a1e17fb7a66460a6f242"
+dependencies = [
+ "memmap",
 ]
 
 [[package]]
