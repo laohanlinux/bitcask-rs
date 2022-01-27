@@ -13,7 +13,7 @@ mod error;
 mod hint;
 mod key_value;
 mod metadata;
-mod mmap;
+pub mod mmap;
 mod radix_tree;
 mod recover;
 mod tests;

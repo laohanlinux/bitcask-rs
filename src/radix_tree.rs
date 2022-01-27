@@ -18,7 +18,6 @@ use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::thread::current;
-
 // TODO
 // 1: add async read/write
 // 2: enc/dec into Hint
@@ -65,22 +64,18 @@ where
     V: Encode + Decode<V> + From<Vec<u8>> + Display,
 {
     fn save(&mut self, path: &str) -> Result<bool> {
-        // let mut fp = OpenOptions::new()
-        //     .write(true)
-        //     .read(true)
-        //     .create(true)
-        //     .truncate(true)
-        //     .open(path)
-        //     .map_err(|err| UnexpectedError(err.to_string()))?;
-        let mut fp = mmap_storage::file::Storage::open(path)
-            .map_err(|err| UnexpectedError(err.to_string()))?;
-        let mut fp = BufWriter::new(fp);
+        let start = chrono::Utc::now();
+        let mut total = 0;
+        let mut fp = MMapFile::new(path).map_err(|err| UnexpectedError(err.to_string()))?;
+        let mut buf = Vec::with_capacity(1 << 20);
         for (key, entry) in self.store.iter() {
             assert!(!key.is_empty());
             let mut buffer = Cursor::new(vec![]);
             entry.encode(&mut buffer)?;
             let value = buffer.into_inner();
             assert!(value.len() <= 1 << 10);
+
+            let mut fp = Cursor::new(vec![]);
             fp.write_u64::<BigEndian>(key.len() as u64)
                 .map_err(|err| UnexpectedError(err.to_string()))?;
             fp.write_u64::<BigEndian>(value.len() as u64)
@@ -89,8 +84,17 @@ where
                 .map_err(|err| UnexpectedError(err.to_string()))?;
             fp.write(&value)
                 .map_err(|err| UnexpectedError(err.to_string()))?;
+            total += Self::KEY_SIZE + Self::VALUE_SIZE + (key.len() + value.len()) as u64;
+            buf.append(&mut fp.into_inner());
         }
-        fp.flush().map_err(|err| UnexpectedError(err.to_string()))?;
+        fp.append(&buf);
+        fp.flush()?;
+        info!(
+            "hint saver stats, count:{}, total:{}m, cost: {}ms",
+            self.store.count(),
+            total as f64 / 1024.0 / 1024.0,
+            chrono::Utc::now().timestamp_millis() - start.timestamp_millis()
+        );
         Ok(true)
     }
 
@@ -223,13 +227,16 @@ fn radix_tree() {
 #[test]
 fn random_radix_tree() {
     use crate::tests_util;
+    use env_logger::Env;
     use rand::random;
+    env_logger::try_init_from_env(Env::new().default_filter_or("info"));
+
     let mut index = Indexer::new();
     let n = 1000000;
     for i in 0..n {
         let hint = Hint::new(i, i + 1, i + 2, 60);
-        let key = random::<usize>();
-        index.insert(format!("{}", key).into_bytes(), hint);
+        // let key = random::<usize>();
+        index.insert(format!("{}", i).into_bytes(), hint);
     }
     for i in 0..n {
         index.remove(&format!("{}", i).into_bytes());

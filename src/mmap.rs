@@ -30,7 +30,13 @@ pub struct MMapFile {
 }
 
 impl MMapFile {
-    pub fn new(fp: File) -> Result<MMapFile> {
+    pub fn new(path: &str) -> Result<MMapFile> {
+        let fp = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .open(path)
+            .map_err(|err| UnexpectedError(err.to_string()))?;
         Ok(MMapFile { fp, mmap: None })
     }
 

@@ -6,15 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-serde = {version = "1.0.131", features = ["derive"]}
+serde = { version = "1.0.131", features = ["derive"] }
 serde_json = { version = "1.0", default-features = true, features = ["alloc"] }
 anyhow = "1.0.31"
 thiserror = "1.0"
 filename = "0.1.1"
-crc="2.1.0"
+crc = "2.1.0"
 bytes = { version = "1.1.0", features = ["serde"] }
 byteorder = "1"
-log = {version = "0.4.14", features = ["kv_unstable"]}
+log = { version = "0.4.14", features = ["kv_unstable"] }
 qp-trie = "0.7.7"
 toml = "0.5.8"
 fd-lock = "3.0.2"
@@ -35,3 +35,9 @@ random = "0.12.2"
 rand = "0.8.4"
 threadpool = "1.8.1"
 simple-logging = "2.0.2"
+criterion = "0.3"
+pprof = { version = "0.4", features = ["flamegraph", "criterion"] }
+
+[[bench]]
+name = "mmap_b"
+harness = false
