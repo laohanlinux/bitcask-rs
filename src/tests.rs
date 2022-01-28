@@ -339,19 +339,48 @@ mod tests {
         let final_entries = bitcask.lc().entries();
     }
 
+    #[test]
+    fn scan() {
+        let tmp = mock(None);
+        let cfg = Config::default().auto_sync(false).auto_merge(false);
+        let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
+        let mut entries = generate_1m_entry();
+        for entry in entries.iter_mut() {
+            entry.key.insert(0, 65);
+        }
+        let expect_n = entries.len();
+        for entry in entries {
+            bitcask
+                .put_with_ttl(entry.key, entry.value, entry.expiry)
+                .unwrap();
+        }
+        let mut n = 0;
+        bitcask.scan("A".as_bytes().to_vec(), |(key, value)| {
+            n += 1;
+            Ok(())
+        });
+        assert_eq!(n, expect_n);
+
+        let mut n = 0;
+        bitcask.scan("B".as_bytes().to_vec(), |(key, value)| {
+            n += 1;
+            Ok(())
+        });
+        assert_eq!(n, 0);
+
+        let mut n = 0;
+        bitcask.scan("".as_bytes().to_vec(), |(key, value)| {
+            n += 1;
+            Ok(())
+        });
+
+        assert_eq!(n, expect_n);
+    }
+
     fn mock(prefix: impl Into<Option<String>>) -> String {
         use env_logger::Builder;
         use log::LevelFilter;
         use std::io::Write;
-
-        // {
-        //     let mut builder = Builder::from_default_env();
-        //     builder
-        //         .format(|buf, record| writeln!(buf, "[{} {} {}:{}] {}", chrono::Local::now(), record.level(), record.file_static().unwrap(), record.line().unwrap() , record.args()))
-        //         .filter(None, LevelFilter::Debug)
-        //         .try_init();
-        // }
-
         env_logger::try_init_from_env(Env::new().default_filter_or("info"));
         let prefix = prefix.into();
         return if let Some(prefix) = prefix {
