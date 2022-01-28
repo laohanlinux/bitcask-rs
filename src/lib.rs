@@ -192,6 +192,23 @@ impl BitCask {
         bc.hint_index.count()
     }
 
+    pub fn scan(
+        &self,
+        prefix: impl Into<Option<Vec<u8>>>,
+        mut f: impl FnMut((&[u8], &[u8])) -> Result<()>,
+    ) -> Result<()> {
+        let prefix = prefix.into().unwrap_or_default();
+        let mut bc = self.lc();
+        for (key, hint) in bc.hint_index.iter_prefix(&prefix).into_iter() {
+            if let Some(ref value) = bc.get(key) {
+                if let Err(err) = f((key, value)) {
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn reopen(&mut self) -> Result<()> {
         let mut bc = self.lc();
         bc.reopen()
