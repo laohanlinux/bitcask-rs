@@ -66,3 +66,7 @@ pub(crate) fn load_index_from_data_file(hint: &mut Indexer<Hint>, df: &mut DataF
 pub(crate) fn expire_key() -> impl FnMut(&Entry) -> bool {
     |entry: &Entry| -> bool { entry.expiry < chrono::Utc::now().timestamp() }
 }
+
+pub(crate) fn expire_hint() -> impl FnMut(&Hint) -> bool {
+    |hint: &Hint| -> bool { !hint.is_expire() }
+}

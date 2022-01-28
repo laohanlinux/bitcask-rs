@@ -152,7 +152,6 @@ mod tests {
             assert!(bitcask.close().is_ok());
         }
 
-        debug!("---------------");
         // recover
         {
             let mut cfg = Config::default().auto_sync(false).auto_merge(true);
@@ -160,7 +159,6 @@ mod tests {
             assert_eq!(bitcask.count(), n);
             assert!(bitcask.close().is_ok());
         }
-        debug!("---------------");
         // delete it
         let mut hint1 = HashMap::new();
         {
@@ -265,6 +263,28 @@ mod tests {
             bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
         }
         info!("finished put");
+        bitcask.close();
+    }
+
+    #[test]
+    fn merge_timout_hint() {
+        let tmp = mock(None);
+        let cfg = Config::default().auto_merge(false);
+        let bitcask = BitCask::open(Path::new(&tmp), cfg).unwrap();
+        let mut entries = generate_1m_entry();
+        let mut timout_n = 103;
+        for i in 1..=timout_n {
+            entries[i].expiry = 3;
+        }
+        let num = entries.len();
+        for entry in &entries {
+            bitcask.put_with_ttl(entry.key.clone(), entry.value.clone(), entry.expiry);
+        }
+        sleep(Duration::from_secs(5));
+        let ok = bitcask.merge();
+        assert!(ok.is_ok());
+        let count = bitcask.count();
+        assert_eq!(count, entries.len() - timout_n);
         bitcask.close();
     }
 

@@ -20,15 +20,6 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn save(&self, path: PathBuf) -> Result<()> {
-        fs::write(path, toml::to_vec(&self).unwrap())
-            .map_err(|err| BitCaskError::FailedOpenDB(err.to_string()))
-    }
-    pub fn load(path: PathBuf) -> Result<Self> {
-        let buf = fs::read_to_string(path)?;
-        toml::from_str(&*buf).map_err(|err| BitCaskError::FailedOpenDB(err.to_string()))
-    }
-
     pub fn set_max_data_file_size(mut self, size: u64) -> Self {
         self.max_data_file_size = size;
         self
@@ -77,6 +68,16 @@ impl Config {
     pub fn auto_merge_dirty_used_rate(mut self, rate: f64) -> Self {
         self.auto_merge_dirty_used_rate = rate;
         self
+    }
+
+    pub(crate) fn load(path: PathBuf) -> Result<Self> {
+        let buf = fs::read_to_string(path)?;
+        toml::from_str(&*buf).map_err(|err| BitCaskError::FailedOpenDB(err.to_string()))
+    }
+
+    pub(crate) fn save(&self, path: PathBuf) -> Result<()> {
+        fs::write(path, toml::to_vec(&self).unwrap())
+            .map_err(|err| BitCaskError::FailedOpenDB(err.to_string()))
     }
 }
 
