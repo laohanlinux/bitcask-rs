@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::mmap::MMapFile;
     use crate::{BitCask, Config, DataFile, Entry, Hint, Index, Indexer, Persisted};
     use crossbeam_channel::select;
     use env_logger::{Env, Target};
@@ -7,7 +8,7 @@ mod tests {
     use rand::random;
     use std::collections::HashMap;
     use std::fs::{remove_dir_all, OpenOptions};
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor, Write};
     use std::path::Path;
     use std::str::Chars;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -319,6 +320,45 @@ mod tests {
         let final_entries = bitcask.lc().entries();
     }
 
+    #[test]
+    fn test_mmap_entry() {
+        let buffer = generate_n_sz_buffer(1 << 30);
+        {
+            let tmp = mock(None);
+            let start = chrono::Utc::now();
+            let mut fp = OpenOptions::new()
+                .write(true)
+                .read(true)
+                .create(true)
+                .open(&tmp)
+                .unwrap();
+            let mut m = MMapFile::new(&tmp).unwrap();
+            m.append(&buffer).unwrap();
+            m.flush().unwrap();
+            println!(
+                "cost1 {}ms",
+                chrono::Utc::now().timestamp_millis() - start.timestamp_millis()
+            );
+        }
+
+        {
+            let tmp = mock(None);
+            let start = chrono::Utc::now();
+            let mut fp = OpenOptions::new()
+                .write(true)
+                .read(true)
+                .create(true)
+                .open(&tmp)
+                .unwrap();
+            fp.write_all(&buffer).unwrap();
+            fp.flush().unwrap();
+            println!(
+                "cost2 {}ms",
+                chrono::Utc::now().timestamp_millis() - start.timestamp_millis()
+            );
+        }
+    }
+
     fn mock(prefix: impl Into<Option<String>>) -> String {
         use env_logger::Builder;
         use log::LevelFilter;
@@ -424,13 +464,14 @@ mod tests {
     }
 
     fn generate_n_sz_buffer(n: usize) -> Vec<u8> {
-        use rand::{distributions::Alphanumeric, Rng};
-        let value = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(n)
-            .map(char::from)
-            .collect::<String>()
-            .into_bytes();
-        value
+        use bra::GreedyAccessReader;
+        use std::io::BufRead;
+        use std::io::Read;
+        let reader = Cursor::new(vec![0; n]);
+        let mut reader = GreedyAccessReader::new(reader);
+
+        let s: &[u8] = reader.slice(0..n).unwrap();
+        assert_eq!(s.len(), n);
+        s.to_vec()
     }
 }
