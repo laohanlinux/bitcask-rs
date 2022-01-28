@@ -15,6 +15,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::thread::spawn;
 
 // TODO
 // 1: add async read/write

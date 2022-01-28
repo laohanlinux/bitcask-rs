@@ -33,3 +33,9 @@ random = "0.12.2"
 rand = "0.8.4"
 threadpool = "1.8.1"
 simple-logging = "2.0.2"
+criterion = "0.3"
+pprof = { version = "0.4", features = ["flamegraph", "criterion"] }
+bra = "0.1.1"
+[[bench]]
+name = "bc"
+harness = false

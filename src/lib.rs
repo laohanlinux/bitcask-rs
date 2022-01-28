@@ -18,8 +18,6 @@ mod recover;
 mod tests;
 mod tests_util;
 mod util;
-
-use crate::config::Config;
 use crate::data_file::{load_data_files, DataFile};
 use crate::entry::{Entry, CRC32};
 use crate::error::BitCaskError::{EmptyKey, TooLargeKey, TooLargeValue, UnexpectedError};
@@ -29,6 +27,7 @@ use crate::metadata::MetaData;
 use crate::radix_tree::{Index, Indexer, Persisted};
 use crate::recover::check_and_recover;
 use crate::util::{expire_hint, expire_key, load_index_from_data_file};
+pub use config::Config;
 use crossbeam::sync::WaitGroup;
 use crossbeam_channel::{select, Receiver, Sender};
 use fslock::LockFile;
