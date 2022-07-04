@@ -4,6 +4,7 @@
 #![feature(path_try_exists)]
 #![feature(seek_stream_len)]
 #![feature(thread_id_value)]
+#![feature(fs_try_exists)]
 
 mod codec;
 mod config;
