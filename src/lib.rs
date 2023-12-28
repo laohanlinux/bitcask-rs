@@ -565,7 +565,12 @@ impl MergeProcessor for BitCaskCore {
         keys.sort();
         let oldest = keys.first().unwrap();
         let df = self.datafiles.get_mut(oldest).unwrap();
-        df.reset()?;
+        df.incr_ref();
+        if let Err(err) = df.reset() {
+            df.decr_ref();
+            return Err(err);
+        }
+
         let keys = df
             .into_iter()
             .filter(|(_, entry)| !entry.value.is_empty())

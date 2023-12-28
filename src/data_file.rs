@@ -15,6 +15,7 @@ use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::SeekFrom::End;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::AtomicI64;
 
 // TODO: add cache
 #[derive(Default)]
@@ -23,6 +24,7 @@ pub(crate) struct DataFile {
     pub(crate) fs: Option<File>,
     pub(crate) base_name: String,
     iter_offset: usize,
+    pub(crate) _ref: AtomicI64,
 }
 
 impl DataFile {
@@ -46,7 +48,16 @@ impl DataFile {
             fs: Some(fs),
             base_name,
             iter_offset: 0,
+            _ref: AtomicI64::new(0),
         }
+    }
+
+    pub(crate) fn incr_ref(&self) {
+        self._ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn decr_ref(&self) {
+        self._ref.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn file_id(&self) -> u64 {

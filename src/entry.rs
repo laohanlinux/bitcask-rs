@@ -105,23 +105,17 @@ impl Encode for Entry {
     #[inline]
     fn encode<Wt: Write>(&self, fs: &mut Wt) -> Result<()> {
         let mut fs = BufWriter::new(fs);
-        fs
-            .write_u32::<BigEndian>(self.check_sum)
+        fs.write_u32::<BigEndian>(self.check_sum)
             .map_err(|err| BitCaskError::UnexpectedError(err.to_string()))?;
-        fs
-            .write_i64::<BigEndian>(self.expiry)
+        fs.write_i64::<BigEndian>(self.expiry)
             .map_err(|err| BitCaskError::UnexpectedError(err.to_string()))?;
-        fs
-            .write_u32::<BigEndian>(self.key.len() as u32)
+        fs.write_u32::<BigEndian>(self.key.len() as u32)
             .map_err(|err| BitCaskError::UnexpectedError(err.to_string()))?;
-        fs
-            .write_u64::<BigEndian>(self.value.len() as u64)
+        fs.write_u64::<BigEndian>(self.value.len() as u64)
             .map_err(|err| BitCaskError::UnexpectedError(err.to_string()))?;
-        fs
-            .write(&*self.key)
+        fs.write(&*self.key)
             .map_err(|err| BitCaskError::UnexpectedError(err.to_string()))?;
-        fs
-            .write(&*self.value)
+        fs.write(&*self.value)
             .map_err(|err| BitCaskError::UnexpectedError(err.to_string()))?;
         // debug!("cur: {:?}", buffer);
         Ok(())

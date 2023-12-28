@@ -2,10 +2,10 @@ use crate::codec::{Decode, Encode, KeyValue};
 use crate::error::BitCaskError::{NoMoreData, UnexpectedError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use kv_log_macro::debug;
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::io::{Cursor, Read, Seek, Write};
-use log::info;
 
 // `Item` represents the location of the value on disk. This is used by the
 // internal Adaptive Radix Tree to hold an in-memory structure mapping keys to
@@ -88,7 +88,10 @@ impl Decode<Hint> for Hint {
             .read_u64::<BigEndian>()
             .map_err(|err| UnexpectedError(err.to_string()))?;
         if expire_hi > 0 {
-            item.expire = Some(fs.read_i64::<BigEndian>().map_err(|err| UnexpectedError(err.to_string()))?);
+            item.expire = Some(
+                fs.read_i64::<BigEndian>()
+                    .map_err(|err| UnexpectedError(err.to_string()))?,
+            );
         }
         Ok(item)
     }
